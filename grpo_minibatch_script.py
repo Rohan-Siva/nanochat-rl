@@ -34,7 +34,7 @@ def main():
     eval_examples = 200
     
     # added mini batching configs
-    mini_batch_size = 32  
+    mini_batch_size = 32
     num_mini_epochs = 1   
 
     use_wandb = True # log wandb
@@ -81,6 +81,7 @@ def main():
         all_inputs = []
         all_targets = []
         all_advantages = []
+        all_rewards = []
         
         for _ in range(examples_per_step):
             example_idx = next(iterator)
@@ -145,6 +146,7 @@ def main():
             all_inputs.append(inputs.cpu())
             all_targets.append(targets.cpu())
             all_advantages.append(advantages.cpu())
+            all_rewards.append(rewards.cpu())
         
         # find the maximum sequence length across all rollouts
         max_seq_len = max(inp.size(1) for inp in all_inputs)
@@ -175,8 +177,9 @@ def main():
         all_inputs = torch.cat(padded_inputs, dim=0)
         all_targets = torch.cat(padded_targets, dim=0)
         all_advantages = torch.cat(all_advantages, dim=0)
+        all_rewards = torch.cat(all_rewards, dim=0)
         
-        return all_inputs, all_targets, all_advantages
+        return all_inputs, all_targets, all_advantages, all_rewards
 
     # optimizer setup
     optimizers = model.setup_optimizers(
@@ -205,7 +208,7 @@ def main():
             print(f"--- Eval at step {step} ---")
 
         # collect rollouts for this step
-        all_inputs, all_targets, all_advantages = collect_rollouts(ddp, device)
+        all_inputs, all_targets, all_advantages, all_rewards = collect_rollouts(ddp, device)
         
         total_samples = all_inputs.size(0)
         print(f"Collected {total_samples} samples for step {step}")
@@ -227,37 +230,48 @@ def main():
             for i in range(0, total_samples, mini_batch_size):
                 # get mini-batch indices
                 mini_batch_indices = indices[i:i + mini_batch_size]
-                
-                # move mini-batch to GPU
-                mini_inputs = all_inputs[mini_batch_indices].to(device)
-                mini_targets = all_targets[mini_batch_indices].to(device)
-                mini_advantages = all_advantages[mini_batch_indices].to(device)
-                
-                model.train()
-                
-                with autocast_ctx:
-                    # loss_reduction='none' gives (B, T)
-                    logp = -model(mini_inputs, mini_targets, loss_reduction='none').view_as(mini_inputs)
-                
-                # Policy gradient: - sum(log_prob * advantage)
-                pg_obj = (logp * mini_advantages.unsqueeze(-1)).sum()
-                
-                num_valid = (mini_targets >= 0).sum().clamp(min=1)
-                pg_obj = pg_obj / num_valid
-                
-                loss = -pg_obj
-                loss.backward()
-                
-                # Model weight update
+                current_mini_batch_size = len(mini_batch_indices)
+
+                # apply gradient accumulation: for each mini batch we process micro batches(device_batch_size)
+                for j in range(0, current_mini_batch_size, device_batch_size):
+                    micro_batch_indices = mini_batch_indices[j:j + device_batch_size]
+                    
+                    # move micro-batch to GPU
+                    micro_inputs = all_inputs[micro_batch_indices].to(device)
+                    micro_targets = all_targets[micro_batch_indices].to(device)
+                    micro_advantages = all_advantages[micro_batch_indices].to(device)
+                    
+                    model.train()
+                    
+                    with autocast_ctx:
+                        # loss_reduction='none' gives (B, T)
+                        logp = -model(micro_inputs, micro_targets, loss_reduction='none').view_as(micro_inputs)
+                    
+                    # Policy gradient: - sum(log_prob * advantage)
+                    pg_obj = (logp * micro_advantages.unsqueeze(-1)).sum()
+                    
+                    num_valid = (micro_targets >= 0).sum().clamp(min=1)
+                    
+                    pg_obj = pg_obj / num_valid
+                    
+                    # gradient should be the average over the full mini-batch.
+                    # currently pg_obj is the average over the micro-batch.
+                    # so multiply by (micro_batch_size / mini_batch_size).
+                    loss_scale = len(micro_batch_indices) / current_mini_batch_size
+                    loss = -pg_obj * loss_scale
+                    
+                    loss.backward()
+                    total_loss += loss.item() # now weighted, so it sums up to the avg loss of the mini-batch
+
+                # update model weights after mini batch
                 for opt in optimizers:
                     opt.step()
                 model.zero_grad(set_to_none=True)
                 
-                total_loss += loss.item()
                 num_updates += 1
         
         avg_loss = total_loss / num_updates if num_updates > 0 else 0.0
-        mean_reward = all_advantages.mean().item() + all_advantages.mean().item()  # Approximate from advantages
+        mean_reward = all_rewards.mean().item()
         
         print(f"Step {step} | Avg Loss: {avg_loss:.4f} | LR Multiplier: {lrm:.4f} | Mean Reward: {mean_reward:.4f} | Updates: {num_updates}")
         
