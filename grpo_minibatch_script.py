@@ -27,7 +27,7 @@ def main():
     embedding_lr = 0.2
     matrix_lr = 0.02
     weight_decay = 0.0
-    init_lr_frac = 0.05
+    init_lr_frac = 0.01
     num_epochs = 2
     save_every = 250
     eval_every = 50
