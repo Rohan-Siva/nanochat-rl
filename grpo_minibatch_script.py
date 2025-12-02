@@ -14,7 +14,7 @@ def main():
     print(f"Current working directory: {os.getcwd()}")
 
     # configs
-    run_name = "grpo_gsm8k_minibatch" 
+    run_name = "grpo_gsm8k_minibatch_v2" 
     source = "sft" 
     dtype = "bfloat16"
     device_batch_size = 4 
@@ -33,9 +33,9 @@ def main():
     eval_every = 50
     eval_examples = 200
     
-    # Mini-batch configuration
-    mini_batch_size = 8  # Size of each mini-batch
-    num_mini_epochs = 1   # Number of passes over the collected data
+    # added mini batching configs
+    mini_batch_size = 32  
+    num_mini_epochs = 1   
 
     use_wandb = True # log wandb
     if use_wandb:
@@ -65,17 +65,15 @@ def main():
     engine = Engine(model, tokenizer)
     print("Model loaded.")
 
-    # Initialize Tasks
     train_task = GSM8K(subset="main", split="train")
     val_task = GSM8K(subset="main", split="test")
     num_steps = (len(train_task) // examples_per_step) * num_epochs
     print(f"Training examples: {len(train_task)}")
     print(f"Calculated number of steps: {num_steps}")
 
-    # Helper function to collect a batch of rollouts
+    # batch of rollout collection: examples per step * num_samples
     @torch.no_grad()
     def collect_rollouts(ddp, device):
-        """Collect examples_per_step rollouts with num_samples each"""
         assistant_end = tokenizer.encode_special("<|assistant_end|>")
         rank_indices = range(ddp_rank, len(train_task), ddp_world_size)
         iterator = itertools.cycle(rank_indices)
@@ -144,20 +142,20 @@ def main():
             mu = rewards.mean()
             advantages = rewards - mu
             
-            all_inputs.append(inputs)
-            all_targets.append(targets)
-            all_advantages.append(advantages)
+            all_inputs.append(inputs.cpu())
+            all_targets.append(targets.cpu())
+            all_advantages.append(advantages.cpu())
         
-        # Find the maximum sequence length across all rollouts
+        # find the maximum sequence length across all rollouts
         max_seq_len = max(inp.size(1) for inp in all_inputs)
         
-        # Synchronize max_seq_len across all ranks in DDP
+        # sync max_seq_len across all ranks in DDP
         if ddp:
             max_seq_len_tensor = torch.tensor(max_seq_len, device=device)
             torch.distributed.all_reduce(max_seq_len_tensor, op=torch.distributed.ReduceOp.MAX)
             max_seq_len = max_seq_len_tensor.item()
         
-        # Pad all sequences to the same length
+        # pad all sequences to the same length
         padded_inputs = []
         padded_targets = []
         
@@ -165,22 +163,22 @@ def main():
             current_len = inputs.size(1)
             if current_len < max_seq_len:
                 pad_len = max_seq_len - current_len
-                # Pad inputs with assistant_end token
-                inputs = torch.cat([inputs, torch.full((inputs.size(0), pad_len), assistant_end, dtype=torch.long, device=device)], dim=1)
-                # Pad targets with -1 (masked out)
-                targets = torch.cat([targets, torch.full((targets.size(0), pad_len), -1, dtype=torch.long, device=device)], dim=1)
+
+                inputs = torch.cat([inputs, torch.full((inputs.size(0), pad_len), assistant_end, dtype=torch.long, device='cpu')], dim=1)
+
+                targets = torch.cat([targets, torch.full((targets.size(0), pad_len), -1, dtype=torch.long, device='cpu')], dim=1)
             
             padded_inputs.append(inputs)
             padded_targets.append(targets)
         
-        # Concatenate all rollouts and move to CPU to save GPU memory
-        all_inputs = torch.cat(padded_inputs, dim=0).cpu()
-        all_targets = torch.cat(padded_targets, dim=0).cpu()
-        all_advantages = torch.cat(all_advantages, dim=0).cpu()
+        # concatenate all rollouts (already on CPU)
+        all_inputs = torch.cat(padded_inputs, dim=0)
+        all_targets = torch.cat(padded_targets, dim=0)
+        all_advantages = torch.cat(all_advantages, dim=0)
         
         return all_inputs, all_targets, all_advantages
 
-    # Setup Optimizer
+    # optimizer setup
     optimizers = model.setup_optimizers(
         unembedding_lr=unembedding_lr,
         embedding_lr=embedding_lr,
@@ -206,31 +204,31 @@ def main():
         if step % eval_every == 0:
             print(f"--- Eval at step {step} ---")
 
-        # Collect rollouts for this step
+        # collect rollouts for this step
         all_inputs, all_targets, all_advantages = collect_rollouts(ddp, device)
         
         total_samples = all_inputs.size(0)
         print(f"Collected {total_samples} samples for step {step}")
         
-        # Update learning rate
+        # update learning rate (currently linear decay)
         lrm = get_lr_multiplier(step)
         for opt in optimizers:
             for group in opt.param_groups:
                 group["lr"] = group["initial_lr"] * lrm
         
-        # Mini-batch training
+        # mini-batch training
         total_loss = 0.0
         num_updates = 0
         
         for mini_epoch in range(num_mini_epochs):
-            # Shuffle indices for this mini-epoch (on CPU)
+            # shuffle indices for this mini-epoch (on CPU)
             indices = torch.randperm(total_samples)
             
             for i in range(0, total_samples, mini_batch_size):
-                # Get mini-batch indices
+                # get mini-batch indices
                 mini_batch_indices = indices[i:i + mini_batch_size]
                 
-                # Move mini-batch to GPU
+                # move mini-batch to GPU
                 mini_inputs = all_inputs[mini_batch_indices].to(device)
                 mini_targets = all_targets[mini_batch_indices].to(device)
                 mini_advantages = all_advantages[mini_batch_indices].to(device)
@@ -261,14 +259,15 @@ def main():
         avg_loss = total_loss / num_updates if num_updates > 0 else 0.0
         mean_reward = all_advantages.mean().item() + all_advantages.mean().item()  # Approximate from advantages
         
-        print(f"Step {step} | Avg Loss: {avg_loss:.4f} | LR Multiplier: {lrm:.4f} | Updates: {num_updates}")
+        print(f"Step {step} | Avg Loss: {avg_loss:.4f} | LR Multiplier: {lrm:.4f} | Mean Reward: {mean_reward:.4f} | Updates: {num_updates}")
         
         if use_wandb:
             wandb.log({
                 "step": step, 
                 "loss": avg_loss, 
                 "lrm": lrm,
-                "num_updates": num_updates
+                "num_updates": num_updates,
+                "mean_reward": mean_reward
             })
 
         # Save Model
