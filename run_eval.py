@@ -24,6 +24,7 @@ def get_args():
     # some validation args added
     parser.add_argument("--eval", action="store_true", help="Run evaluation on GSM8K test set")
     parser.add_argument("--num_samples", type=int, default=100, help="Number of samples to evaluate")
+    parser.add_argument("--pass_at_k", type=int, default=1, help="K for Pass@K metric (number of samples per prompt)")
     parser.add_argument("--temperature", type=float, default=0.6, help="Sampling temperature")
     return parser.parse_args()
 
@@ -61,7 +62,7 @@ def main():
     assistant_start = tokenizer.encode_special("<|assistant_start|>")
     assistant_end = tokenizer.encode_special("<|assistant_end|>")
 
-    def generate_response(prompt, temperature=0.6, top_k=50, max_tokens=512):
+    def generate_responses(prompt, num_samples=1, temperature=0.6, top_k=50, max_tokens=512):
         conversation_tokens = [bos]
         conversation_tokens.append(user_start)
         conversation_tokens.extend(tokenizer.encode(prompt))
@@ -69,25 +70,38 @@ def main():
         conversation_tokens.append(assistant_start)
         
         generate_kwargs = {
-            "num_samples": 1,
+            "num_samples": num_samples,
             "max_tokens": max_tokens,
             "temperature": temperature,
             "top_k": top_k,
         }
         
-        response_text = ""
+       
+        response_texts = [""] * num_samples
+        
+        finished = [False] * num_samples
+        
         with autocast_ctx:
             for token_column, token_masks in engine.generate(conversation_tokens, **generate_kwargs):
-                token = token_column[0]
-                if token == assistant_end: 
-                    break
-                token_text = tokenizer.decode([token])
-                response_text += token_text
+                all_finished = True
+                for i, token in enumerate(token_column):
+                    if finished[i]:
+                        continue
+                    
+                    if token == assistant_end: 
+                        finished[i] = True
+                    else:
+                        token_text = tokenizer.decode([token])
+                        response_texts[i] += token_text
+                        all_finished = False 
                 
-        return response_text
+                if all_finished:
+                    break
+                
+        return response_texts
 
     if args.eval:
-        print0(f"\nEvaluating on GSM8K (test split) - {args.num_samples} samples")
+        print0(f"\nEvaluating on GSM8K (test split) - {args.num_samples} samples, Pass@{args.pass_at_k}")
         val_task = GSM8K(subset="main", split="test")
         
         correct_count = 0
@@ -95,25 +109,46 @@ def main():
         
         num_eval = min(args.num_samples, len(val_task))
         
-        pbar = tqdm(range(num_eval), desc="Evaluating", unit="sample")
+        pbar = tqdm(range(num_eval), desc=f"Evaluating Pass@{args.pass_at_k}", unit="sample")
         
         for i in pbar:
             conversation = val_task.get_example(i)
             prompt = conversation['messages'][0]['content']
             
-            response = generate_response(prompt, temperature=args.temperature)
+            if i == 0:
+                print0(f"\n[Sample Input]:\n{prompt}")
+                
+                # extract correct answer for logging
+                correct_msg = conversation['messages'][-1]['content']
+                if isinstance(correct_msg, list):
+                    correct_text = "".join([part["text"] for part in correct_msg])
+                else:
+                    correct_text = str(correct_msg)
+                print0(f"\n[Correct Answer]:\n{correct_text}")
+
+            responses = generate_responses(prompt, num_samples=args.pass_at_k, temperature=args.temperature)
+
+            if i == 0:
+                print0(f"\n[Sample Output (1/{len(responses)})]:\n{responses[0]}\n")
+                print0("-" * 50)
             
-            reward = val_task.reward(conversation, response)
+            # check for pass@k
+            any_correct = False
+            for response in responses:
+                reward = val_task.reward(conversation, response)
+                if reward == 1.0:
+                    any_correct = True
+                    break
             
-            if reward == 1.0:
+            if any_correct:
                 correct_count += 1
             total_count += 1
             
             current_acc = correct_count / total_count
-            pbar.set_postfix({"accuracy": f"{current_acc:.4f}"})
+            pbar.set_postfix({"acc": f"{current_acc:.4f}"})
             
         final_acc = correct_count / total_count
-        print0(f"\nFinal Accuracy on {total_count} samples: {final_acc:.4f}")
+        print0(f"\nFinal Pass@{args.pass_at_k} Accuracy on {total_count} samples: {final_acc:.4f}")
         
     else:
         print0("\nInteractive Chat Mode. Type 'quit' or 'exit' to stop.\n")
