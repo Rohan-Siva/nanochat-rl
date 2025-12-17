@@ -13,6 +13,7 @@ from nanochat.common import compute_init, autodetect_device_type, print0
 from nanochat.checkpoint_manager import load_model
 from nanochat.engine import Engine
 from tasks.gsm8k import GSM8K
+import torch.distributed as dist
 
 def get_args():
     parser = argparse.ArgumentParser(description="Run inference with NanoChat model")
@@ -32,6 +33,7 @@ def main():
     args = get_args()
 
     device_type = args.device if args.device else autodetect_device_type()
+    print("Device Type:",device_type)
     ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
     
     print0(f"Using device: {device}")
@@ -101,7 +103,9 @@ def main():
         return response_texts
 
     if args.eval:
-        print0(f"\nEvaluating on GSM8K (test split) - {args.num_samples} samples, Pass@{args.pass_at_k}")
+        if ddp_rank == 0:
+            print0(f"\nEvaluating on GSM8K (test split) - {args.num_samples} samples (Pass@{args.pass_at_k}) across {ddp_world_size} GPUs")
+        
         val_task = GSM8K(subset="main", split="test")
         
         correct_count = 0
@@ -109,13 +113,18 @@ def main():
         
         num_eval = min(args.num_samples, len(val_task))
         
-        pbar = tqdm(range(num_eval), desc=f"Evaluating Pass@{args.pass_at_k}", unit="sample")
         
-        for i in pbar:
+        # distribute work across ranks, each rank takes every ddp_world_size-th sample starting from ddp_rank
+        my_indices = range(ddp_rank, num_eval, ddp_world_size)
+        
+        if ddp_rank == 0:
+            pbar = tqdm(total=num_eval, desc=f"Evaluating Pass@{args.pass_at_k}", unit="sample")
+        
+        for i in my_indices:
             conversation = val_task.get_example(i)
             prompt = conversation['messages'][0]['content']
             
-            if i == 0:
+            if i == 0 and ddp_rank == 0:
                 print0(f"\n[Sample Input]:\n{prompt}")
                 
                 # extract correct answer for logging
@@ -128,7 +137,7 @@ def main():
 
             responses = generate_responses(prompt, num_samples=args.pass_at_k, temperature=args.temperature)
 
-            if i == 0:
+            if i == 0 and ddp_rank == 0:
                 print0(f"\n[Sample Output (1/{len(responses)})]:\n{responses[0]}\n")
                 print0("-" * 50)
             
@@ -144,11 +153,21 @@ def main():
                 correct_count += 1
             total_count += 1
             
-            current_acc = correct_count / total_count
-            pbar.set_postfix({"acc": f"{current_acc:.4f}"})
-            
-        final_acc = correct_count / total_count
-        print0(f"\nFinal Pass@{args.pass_at_k} Accuracy on {total_count} samples: {final_acc:.4f}")
+            # ideally we'd gather progress updates but this is simple enough
+            if ddp_rank == 0:
+                 pbar.update(ddp_world_size)
+                 
+        # aggregate results
+        device_tensor = torch.tensor([correct_count, total_count], dtype=torch.long, device=device)
+        dist.all_reduce(device_tensor, op=dist.ReduceOp.SUM)
+        
+        global_correct = device_tensor[0].item()
+        global_total = device_tensor[1].item()
+        
+        if ddp_rank == 0:
+            pbar.close()
+            final_acc = global_correct / global_total if global_total > 0 else 0.0
+            print0(f"\nFinal Pass@{args.pass_at_k} Accuracy on {global_total} samples: {final_acc:.4f}")
         
     else:
         print0("\nInteractive Chat Mode. Type 'quit' or 'exit' to stop.\n")
