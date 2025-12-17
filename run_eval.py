@@ -79,7 +79,7 @@ def main():
         with autocast_ctx:
             for token_column, token_masks in engine.generate(conversation_tokens, **generate_kwargs):
                 token = token_column[0]
-                if token == assistant_end[0]: 
+                if token == assistant_end: 
                     break
                 token_text = tokenizer.decode([token])
                 response_text += token_text
@@ -138,7 +138,7 @@ def main():
             with autocast_ctx:
                 for token_column, token_masks in engine.generate(conversation_tokens, **generate_kwargs):
                     token = token_column[0]
-                    if token == assistant_end[0]: 
+                    if token == assistant_end: 
                         break
                     token_text = tokenizer.decode([token])
                     print(token_text, end="", flush=True)
