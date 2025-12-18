@@ -26,6 +26,7 @@ def get_args():
     parser.add_argument("--eval", action="store_true", help="Run evaluation on GSM8K test set")
     parser.add_argument("--num_samples", type=int, default=100, help="Number of samples to evaluate")
     parser.add_argument("--pass_at_k", type=int, default=1, help="K for Pass@K metric (number of samples per prompt)")
+    parser.add_argument("--batch_size", type=int, default=16, help="Batch size for generation (to avoid OOM)")
     parser.add_argument("--temperature", type=float, default=0.6, help="Sampling temperature")
     return parser.parse_args()
 
@@ -71,36 +72,44 @@ def main():
         conversation_tokens.append(user_end)
         conversation_tokens.append(assistant_start)
         
-        generate_kwargs = {
-            "num_samples": num_samples,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "top_k": top_k,
-        }
+        all_response_texts = []
         
-       
-        response_texts = [""] * num_samples
+        #batch process, prevents oom
+        num_batches = (num_samples + args.batch_size - 1) // args.batch_size
         
-        finished = [False] * num_samples
-        
-        with autocast_ctx:
-            for token_column, token_masks in engine.generate(conversation_tokens, **generate_kwargs):
-                all_finished = True
-                for i, token in enumerate(token_column):
-                    if finished[i]:
-                        continue
+        for b in range(num_batches):
+            current_batch_size = min(args.batch_size, num_samples - b * args.batch_size)
+            
+            generate_kwargs = {
+                "num_samples": current_batch_size,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "top_k": top_k,
+            }
+            
+            batch_response_texts = [""] * current_batch_size
+            finished = [False] * current_batch_size
+            
+            with autocast_ctx:
+                for token_column, token_masks in engine.generate(conversation_tokens, **generate_kwargs):
+                    all_finished = True
+                    for i, token in enumerate(token_column):
+                        if finished[i]:
+                            continue
+                        
+                        if token == assistant_end: 
+                            finished[i] = True
+                        else:
+                            token_text = tokenizer.decode([token])
+                            batch_response_texts[i] += token_text
+                            all_finished = False 
                     
-                    if token == assistant_end: 
-                        finished[i] = True
-                    else:
-                        token_text = tokenizer.decode([token])
-                        response_texts[i] += token_text
-                        all_finished = False 
+                    if all_finished:
+                        break
+            
+            all_response_texts.extend(batch_response_texts)
                 
-                if all_finished:
-                    break
-                
-        return response_texts
+        return all_response_texts
 
     if args.eval:
         if ddp_rank == 0:
