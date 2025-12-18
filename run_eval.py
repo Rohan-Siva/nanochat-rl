@@ -14,6 +14,8 @@ from nanochat.checkpoint_manager import load_model
 from nanochat.engine import Engine
 from tasks.gsm8k import GSM8K
 import torch.distributed as dist
+import json
+import time
 
 def get_args():
     parser = argparse.ArgumentParser(description="Run inference with NanoChat model")
@@ -28,6 +30,7 @@ def get_args():
     parser.add_argument("--pass_at_k", type=int, default=1, help="K for Pass@K metric (number of samples per prompt)")
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for generation (to avoid OOM)")
     parser.add_argument("--temperature", type=float, default=0.6, help="Sampling temperature")
+    parser.add_argument("--output_dir", type=str, default="eval_results", help="Directory to save evaluation results")
     return parser.parse_args()
 
 def main():
@@ -177,6 +180,25 @@ def main():
             pbar.close()
             final_acc = global_correct / global_total if global_total > 0 else 0.0
             print0(f"\nFinal Pass@{args.pass_at_k} Accuracy on {global_total} samples: {final_acc:.4f}")
+            
+            # output to file now
+            os.makedirs(args.output_dir, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            filename = f"eval_{args.source}_{args.tag or 'auto'}_{args.step or 'last'}_pass{args.pass_at_k}_{timestamp}.json"
+            output_path = os.path.join(args.output_dir, filename)
+            
+            results_data = {
+                "config": vars(args),
+                "final_accuracy": final_acc,
+                "total_samples": global_total,
+                "correct_samples": global_correct,
+                "timestamp": timestamp,
+                "dataset": "GSM8K_test"
+            }
+            
+            with open(output_path, "w") as f:
+                json.dump(results_data, f, indent=4)
+            print0(f"Results saved to {output_path}")
         
     else:
         print0("\nInteractive Chat Mode. Type 'quit' or 'exit' to stop.\n")
