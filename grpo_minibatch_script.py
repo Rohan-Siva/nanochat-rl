@@ -29,7 +29,7 @@ def main():
     weight_decay = 0.0
     init_lr_frac = 0.01
     num_epochs = 2
-    save_every = 250
+    save_every = 100
     eval_every = 50
     eval_examples = 200
     
@@ -216,7 +216,7 @@ def main():
     print("Starting training...")
 
     # num of steps to run
-    steps_to_run = 2
+    steps_to_run = 400
 
     for step in range(steps_to_run):
         if step % eval_every == 0:
