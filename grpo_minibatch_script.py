@@ -36,6 +36,7 @@ def main():
     # added mini batching configs
     mini_batch_size = 32
     num_mini_epochs = 1   
+    clip_eps = 0.2
 
     use_wandb = True # log wandb
     if use_wandb:
@@ -82,6 +83,7 @@ def main():
         all_targets = []
         all_advantages = []
         all_rewards = []
+        all_old_log_probs = []
         
         for _ in range(examples_per_step):
             example_idx = next(iterator)
@@ -143,10 +145,17 @@ def main():
             mu = rewards.mean()
             advantages = rewards - mu
             
+            # Helper to get old log probs
+            with autocast_ctx:
+                 # view_as(inputs) to ensure shape (B, T)
+                 nll = model(inputs, targets, loss_reduction='none').view_as(inputs)
+                 old_log_probs = -nll
+
             all_inputs.append(inputs.cpu())
             all_targets.append(targets.cpu())
             all_advantages.append(advantages.cpu())
             all_rewards.append(rewards.cpu())
+            all_old_log_probs.append(old_log_probs.cpu())
         
         # find the maximum sequence length across all rollouts
         max_seq_len = max(inp.size(1) for inp in all_inputs)
@@ -160,8 +169,9 @@ def main():
         # pad all sequences to the same length
         padded_inputs = []
         padded_targets = []
+        padded_old_log_probs = []
         
-        for inputs, targets in zip(all_inputs, all_targets):
+        for inputs, targets, old_log_probs in zip(all_inputs, all_targets, all_old_log_probs):
             current_len = inputs.size(1)
             if current_len < max_seq_len:
                 pad_len = max_seq_len - current_len
@@ -169,17 +179,22 @@ def main():
                 inputs = torch.cat([inputs, torch.full((inputs.size(0), pad_len), assistant_end, dtype=torch.long, device='cpu')], dim=1)
 
                 targets = torch.cat([targets, torch.full((targets.size(0), pad_len), -1, dtype=torch.long, device='cpu')], dim=1)
+                
+                # pad old_log_probs with 0.0 (masked anyway)
+                old_log_probs = torch.cat([old_log_probs, torch.full((old_log_probs.size(0), pad_len), 0.0, dtype=torch.float, device='cpu')], dim=1)
             
             padded_inputs.append(inputs)
             padded_targets.append(targets)
+            padded_old_log_probs.append(old_log_probs)
         
         # concatenate all rollouts (already on CPU)
         all_inputs = torch.cat(padded_inputs, dim=0)
         all_targets = torch.cat(padded_targets, dim=0)
+        all_old_log_probs = torch.cat(padded_old_log_probs, dim=0)
         all_advantages = torch.cat(all_advantages, dim=0)
         all_rewards = torch.cat(all_rewards, dim=0)
         
-        return all_inputs, all_targets, all_advantages, all_rewards
+        return all_inputs, all_targets, all_advantages, all_rewards, all_old_log_probs
 
     # optimizer setup
     optimizers = model.setup_optimizers(
@@ -201,14 +216,14 @@ def main():
     print("Starting training...")
 
     # num of steps to run
-    steps_to_run = 250
+    steps_to_run = 2
 
     for step in range(steps_to_run):
         if step % eval_every == 0:
             print(f"--- Eval at step {step} ---")
 
         # collect rollouts for this step
-        all_inputs, all_targets, all_advantages, all_rewards = collect_rollouts(ddp, device)
+        all_inputs, all_targets, all_advantages, all_rewards, all_old_log_probs = collect_rollouts(ddp, device)
         
         total_samples = all_inputs.size(0)
         print(f"Collected {total_samples} samples for step {step}")
@@ -240,6 +255,7 @@ def main():
                     micro_inputs = all_inputs[micro_batch_indices].to(device)
                     micro_targets = all_targets[micro_batch_indices].to(device)
                     micro_advantages = all_advantages[micro_batch_indices].to(device)
+                    micro_old_log_probs = all_old_log_probs[micro_batch_indices].to(device)
                     
                     model.train()
                     
@@ -247,8 +263,13 @@ def main():
                         # loss_reduction='none' gives (B, T)
                         logp = -model(micro_inputs, micro_targets, loss_reduction='none').view_as(micro_inputs)
                     
-                    # Policy gradient: - sum(log_prob * advantage)
-                    pg_obj = (logp * micro_advantages.unsqueeze(-1)).sum()
+                    # policy gradient with Clipping (PPO style)
+                    ratio = torch.exp(logp - micro_old_log_probs)
+                    
+                    surr1 = ratio * micro_advantages.unsqueeze(-1)
+                    surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * micro_advantages.unsqueeze(-1)
+                    
+                    pg_obj = torch.min(surr1, surr2).sum()
                     
                     num_valid = (micro_targets >= 0).sum().clamp(min=1)
                     
