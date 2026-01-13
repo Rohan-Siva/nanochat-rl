@@ -171,7 +171,8 @@ def main():
                  
         # aggregate results
         device_tensor = torch.tensor([correct_count, total_count], dtype=torch.long, device=device)
-        dist.all_reduce(device_tensor, op=dist.ReduceOp.SUM)
+        if ddp:
+            dist.all_reduce(device_tensor, op=dist.ReduceOp.SUM)
         
         global_correct = device_tensor[0].item()
         global_total = device_tensor[1].item()
