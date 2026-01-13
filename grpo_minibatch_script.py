@@ -1,11 +1,60 @@
 import os
 import itertools
 import torch
+import torch.distributed as dist
 import wandb
 from nanochat.common import compute_init, compute_cleanup, print0, get_base_dir, DummyWandb
 from nanochat.checkpoint_manager import save_checkpoint, load_model
 from nanochat.engine import Engine
 from tasks.gsm8k import GSM8K
+
+# -----------------------------------------------------------------------------
+# Simple evaluation loop for GSM8K pass@k
+def run_gsm8k_eval(task, tokenizer, engine,
+    max_examples=None,
+    num_samples=1,
+    max_completion_tokens=256,
+    temperature=0.0,
+    top_k=50,
+    ddp_rank=0,
+    ddp_world_size=1,
+    device_batch_size=8
+):
+    """
+    Evaluates GSM8K task and returns a list of records of evaluation outcomes.
+    In a distributed setting, all ranks cooperate but this function will NOT
+    do the reduction across ranks. This is the responsibility of the caller.
+    Because the evaluation can take a while, this function will yield records one by one.
+    """
+    max_examples = min(max_examples, len(task)) if max_examples is not None else len(task)
+    for idx in range(ddp_rank, max_examples, ddp_world_size):
+        conversation = task[idx]
+        tokens = tokenizer.render_for_completion(conversation)
+        prefix_length = len(tokens)
+        # Generate k samples using batched generation inside the Engine
+        assert num_samples <= device_batch_size # usually this is true. we can add a loop if not...
+        generated_token_sequences, masks = engine.generate_batch(
+            tokens,
+            num_samples=num_samples,
+            max_tokens=max_completion_tokens,
+            temperature=temperature,
+            top_k=top_k
+        )
+        # Check each sample for correctness
+        outcomes = []
+        for sample_tokens in generated_token_sequences:
+            generated_tokens = sample_tokens[prefix_length:]
+            generated_text = tokenizer.decode(generated_tokens)
+            is_correct = task.evaluate(conversation, generated_text)
+            outcomes.append({
+                "is_correct": is_correct
+            })
+        # A bit bloated because I wanted to do more complex logging at one point.
+        record = {
+            "idx": idx,
+            "outcomes": outcomes,
+        }
+        yield record
 
 def main():
     if os.path.basename(os.getcwd()) == "scripts":
@@ -39,8 +88,17 @@ def main():
     clip_eps = 0.2
 
     use_wandb = True # log wandb
-    if use_wandb:
-        wandb.init(project="nanochat-rl", name=run_name)
+    # Only init wandb on master process
+    if use_wandb and master_process:
+        wandb.init(project="nanochat-rl", name=run_name, config={
+            "run_name": run_name,
+            "source": source,
+            "device_batch_size": device_batch_size,
+            "examples_per_step": examples_per_step,
+            "num_samples": num_samples,
+            "mini_batch_size": mini_batch_size,
+            "num_mini_epochs": num_mini_epochs,
+        })
     else:
         wandb_run = DummyWandb()
 
@@ -221,6 +279,39 @@ def main():
     for step in range(steps_to_run):
         if step % eval_every == 0:
             print(f"--- Eval at step {step} ---")
+            model.eval()
+            passk = torch.zeros(device_batch_size, device=device) # pass@k for k=1..device_batch_size
+            with autocast_ctx:
+                records_iter = run_gsm8k_eval(val_task, tokenizer, engine, 
+                                            max_examples=eval_examples, 
+                                            num_samples=device_batch_size, 
+                                            temperature=1.0, # high temp for pass@k
+                                            ddp_rank=ddp_rank,
+                                            ddp_world_size=ddp_world_size,
+                                            device_batch_size=device_batch_size)
+                records = list(records_iter) # collect all records
+            
+            # calculate pass@k
+            for k in range(1, device_batch_size + 1):
+                passk[k - 1] = sum(any(o["is_correct"] for o in r["outcomes"][:k]) for r in records)
+            
+            num_records = torch.tensor(len(records), dtype=torch.long, device=device)
+            if ddp:
+                dist.all_reduce(num_records, op=dist.ReduceOp.SUM)
+                dist.all_reduce(passk, op=dist.ReduceOp.SUM)
+            
+            if num_records.item() > 0:
+                passk = passk / num_records.item()
+            
+            print_passk = [f"Pass@{k}: {passk[k - 1].item():.4f}" for k in range(1, device_batch_size + 1)]
+            print0(f"Step {step} | {', '.join(print_passk)}")
+            
+            if use_wandb and master_process:
+                log_passk = {f"eval/pass@{k}": passk[k - 1].item() for k in range(1, device_batch_size + 1)}
+                wandb.log({
+                    "step": step,
+                    **log_passk,
+                })
 
         # collect rollouts for this step
         all_inputs, all_targets, all_advantages, all_rewards, all_old_log_probs = collect_rollouts(ddp, device)
@@ -294,16 +385,26 @@ def main():
         avg_loss = total_loss / num_updates if num_updates > 0 else 0.0
         mean_reward = all_rewards.mean().item()
         
-        print(f"Step {step} | Avg Loss: {avg_loss:.4f} | LR Multiplier: {lrm:.4f} | Mean Reward: {mean_reward:.4f} | Updates: {num_updates}")
+        # Sync metrics across all ranks
+        if ddp:
+            # We want the global average for loss and reward
+            # avg_loss (float), mean_reward (float) -> convert to tensor
+            metrics = torch.tensor([avg_loss, mean_reward], dtype=torch.float, device=device)
+            dist.all_reduce(metrics, op=dist.ReduceOp.AVG)
+            avg_loss = metrics[0].item()
+            mean_reward = metrics[1].item()
         
-        if use_wandb:
-            wandb.log({
-                "step": step, 
-                "loss": avg_loss, 
-                "lrm": lrm,
-                "num_updates": num_updates,
-                "mean_reward": mean_reward
-            })
+        if master_process:
+            print(f"Step {step} | Avg Loss: {avg_loss:.4f} | LR Multiplier: {lrm:.4f} | Mean Reward: {mean_reward:.4f} | Updates: {num_updates}")
+            
+            if use_wandb:
+                wandb.log({
+                    "step": step, 
+                    "loss": avg_loss, 
+                    "lrm": lrm,
+                    "num_updates": num_updates,
+                    "mean_reward": mean_reward
+                })
 
         # Save Model
         if (step > 0 and step % save_every == 0) or step == steps_to_run - 1:
