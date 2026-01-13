@@ -87,21 +87,6 @@ def main():
     num_mini_epochs = 1   
     clip_eps = 0.2
 
-    use_wandb = True # log wandb
-    # Only init wandb on master process
-    if use_wandb and master_process:
-        wandb.init(project="nanochat-rl", name=run_name, config={
-            "run_name": run_name,
-            "source": source,
-            "device_batch_size": device_batch_size,
-            "examples_per_step": examples_per_step,
-            "num_samples": num_samples,
-            "mini_batch_size": mini_batch_size,
-            "num_mini_epochs": num_mini_epochs,
-        })
-    else:
-        wandb_run = DummyWandb()
-
     # Init compute
     try:
         ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init()
@@ -116,6 +101,21 @@ def main():
 
     print(f"Device: {device}")
     master_process = ddp_rank == 0
+
+    use_wandb = True # log wandb
+    # Only init wandb on master process
+    if use_wandb and master_process:
+        wandb.init(project="nanochat-rl", name=run_name, config={
+            "run_name": run_name,
+            "source": source,
+            "device_batch_size": device_batch_size,
+            "examples_per_step": examples_per_step,
+            "num_samples": num_samples,
+            "mini_batch_size": mini_batch_size,
+            "num_mini_epochs": num_mini_epochs,
+        })
+    else:
+        wandb_run = DummyWandb()
     pt_dtype = torch.float32 if dtype == 'float32' else torch.bfloat16
     autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=pt_dtype)
 
