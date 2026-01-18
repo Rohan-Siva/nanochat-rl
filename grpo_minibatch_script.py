@@ -385,17 +385,28 @@ def main():
         avg_loss = total_loss / num_updates if num_updates > 0 else 0.0
         mean_reward = all_rewards.mean().item()
         
+        # Calculate per-example accuracy 
+        # all_rewards is (examples_per_step * num_samples,) - reshape to (examples_per_step, num_samples)
+        reshaped_rewards = all_rewards.view(examples_per_step, num_samples)
+        
+        any_correct = (reshaped_rewards > 0.5).any(dim=1).float()  # Pass@K style
+        first_correct = (reshaped_rewards[:, 0] > 0.5).float()  # Pass@1 (first sample only)
+        example_accuracy = any_correct.mean().item()  # This is like Pass@K
+        pass1_accuracy = first_correct.mean().item()  # This matches eval better
+        
         # Sync metrics across all ranks
         if ddp:
             # We want the global average for loss and reward
             # avg_loss (float), mean_reward (float) -> convert to tensor
-            metrics = torch.tensor([avg_loss, mean_reward], dtype=torch.float, device=device)
+            metrics = torch.tensor([avg_loss, mean_reward, example_accuracy, pass1_accuracy], dtype=torch.float, device=device)
             dist.all_reduce(metrics, op=dist.ReduceOp.AVG)
             avg_loss = metrics[0].item()
             mean_reward = metrics[1].item()
+            example_accuracy = metrics[2].item()
+            pass1_accuracy = metrics[3].item()
         
         if master_process:
-            print(f"Step {step} | Avg Loss: {avg_loss:.4f} | LR Multiplier: {lrm:.4f} | Mean Reward: {mean_reward:.4f} | Updates: {num_updates}")
+            print(f"Step {step} | Loss: {avg_loss:.4f} | LR: {lrm:.4f} | MeanRwd: {mean_reward:.4f} | Pass@1: {pass1_accuracy:.4f} | Pass@{num_samples}: {example_accuracy:.4f}")
             
             if use_wandb:
                 wandb.log({
@@ -403,7 +414,9 @@ def main():
                     "loss": avg_loss, 
                     "lrm": lrm,
                     "num_updates": num_updates,
-                    "mean_reward": mean_reward
+                    "mean_reward": mean_reward,
+                    "train/pass1_accuracy": pass1_accuracy,
+                    "train/pass_at_k_accuracy": example_accuracy,
                 })
 
         # Save Model
