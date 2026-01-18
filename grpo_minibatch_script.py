@@ -76,7 +76,7 @@ def main():
     embedding_lr = 0.2
     matrix_lr = 0.02
     weight_decay = 0.0
-    init_lr_frac = 0.01
+    init_lr_frac = 0.025  # Increased from 0.01
     num_epochs = 2
     save_every = 100
     eval_every = 50
@@ -199,9 +199,10 @@ def main():
             
             rewards = torch.tensor(rewards, dtype=torch.float, device=device)
             
-            # GRPO Advantage Calculation
+            # added normalization
             mu = rewards.mean()
-            advantages = rewards - mu
+            std = rewards.std() + 1e-8  # Add eps to avoid division by zero
+            advantages = (rewards - mu) / std  # Normalize by std for stable gradients
             
             # Helper to get old log probs
             with autocast_ctx:
