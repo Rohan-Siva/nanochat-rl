@@ -114,8 +114,7 @@ def main():
             "mini_batch_size": mini_batch_size,
             "num_mini_epochs": num_mini_epochs,
         })
-    else:
-        wandb_run = DummyWandb()
+    # Gate all wandb calls with master_process check (done below)
     pt_dtype = torch.float32 if dtype == 'float32' else torch.bfloat16
     autocast_ctx = torch.amp.autocast(device_type="cuda", dtype=pt_dtype)
 
@@ -370,21 +369,30 @@ def main():
                     micro_advantages = all_advantages[micro_batch_indices].to(device)
                     micro_old_log_probs = all_old_log_probs[micro_batch_indices].to(device)
                     
+                    # Create mask for valid (non-padding) tokens
+                    valid_mask = (micro_targets >= 0).float()
+                    
                     model.train()
                     
                     with autocast_ctx:
                         # loss_reduction='none' gives (B, T)
                         logp = -model(micro_inputs, micro_targets, loss_reduction='none').view_as(micro_inputs)
                     
-                    # policy gradient with Clipping (PPO style)
-                    ratio = torch.exp(logp - micro_old_log_probs)
+                    # Compute ratio in float32 to prevent overflow
+                    logp_f32 = logp.float()
+                    old_logp_f32 = micro_old_log_probs.float()
+                    ratio = torch.exp(logp_f32 - old_logp_f32)
                     
+                    # Mask ratio by valid tokens to prevent pollution from padding
+                    ratio = ratio * valid_mask
+                    
+                    # Policy gradient with Clipping (PPO style)
                     surr1 = ratio * micro_advantages.unsqueeze(-1)
                     surr2 = torch.clamp(ratio, 1.0 - clip_eps, 1.0 + clip_eps) * micro_advantages.unsqueeze(-1)
                     
                     pg_obj = torch.min(surr1, surr2).sum()
                     
-                    num_valid = (micro_targets >= 0).sum().clamp(min=1)
+                    num_valid = valid_mask.sum().clamp(min=1)
                     
                     pg_obj = pg_obj / num_valid
                     
