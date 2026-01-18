@@ -63,7 +63,7 @@ def main():
     print(f"Current working directory: {os.getcwd()}")
 
     # configs
-    run_name = "grpo_gsm8k_minibatch_v2" 
+    run_name = "grpo_gsm8k_minibatch_v4" 
     source = "sft" 
     dtype = "bfloat16"
     device_batch_size = 4 
@@ -77,7 +77,7 @@ def main():
     matrix_lr = 0.02
     weight_decay = 0.0
     init_lr_frac = 0.025  # Increased from 0.01
-    num_epochs = 2
+    num_epochs = 1
     save_every = 100
     eval_every = 50
     eval_examples = 200
@@ -130,12 +130,28 @@ def main():
     print(f"Training examples: {len(train_task)}")
     print(f"Calculated number of steps: {num_steps}")
 
+    # Create a persistent iterator that properly cycles through ALL training examples
+    # This iterator is OUTSIDE collect_rollouts so it persists across step calls
+    def create_example_iterator():
+        """Generator that yields example indices, shuffling each epoch deterministically."""
+        epoch = 0
+        while True:
+            # Get indices for this rank (for DDP)
+            rank_indices = list(range(ddp_rank, len(train_task), ddp_world_size))
+            # Seed with epoch number for deterministic shuffling across ranks
+            import random
+            rng = random.Random(epoch)  # Each epoch gets same seed across ranks
+            rng.shuffle(rank_indices)
+            for idx in rank_indices:
+                yield idx
+            epoch += 1
+    
+    example_iterator = create_example_iterator()
+
     # batch of rollout collection: examples per step * num_samples
     @torch.no_grad()
     def collect_rollouts(ddp, device):
         assistant_end = tokenizer.encode_special("<|assistant_end|>")
-        rank_indices = range(ddp_rank, len(train_task), ddp_world_size)
-        iterator = itertools.cycle(rank_indices)
         
         all_inputs = []
         all_targets = []
@@ -144,7 +160,7 @@ def main():
         all_old_log_probs = []
         
         for _ in range(examples_per_step):
-            example_idx = next(iterator)
+            example_idx = next(example_iterator)
             
             conversation = train_task[example_idx]
             
@@ -199,12 +215,15 @@ def main():
             
             rewards = torch.tensor(rewards, dtype=torch.float, device=device)
             
-            # added normalization
+            # skip norm if all rewards same/there is variance
             mu = rewards.mean()
-            std = rewards.std() + 1e-8  # Add eps to avoid division by zero
-            advantages = (rewards - mu) / std  # Normalize by std for stable gradients
+            std = rewards.std()
+            if std > 1e-6:  # only normalize if there is variance
+                advantages = (rewards - mu) / std
+            else:
+                # 0 advantages if all rewards same
+                advantages = torch.zeros_like(rewards)
             
-            # Helper to get old log probs
             with autocast_ctx:
                  # view_as(inputs) to ensure shape (B, T)
                  nll = model(inputs, targets, loss_reduction='none').view_as(inputs)
@@ -269,13 +288,13 @@ def main():
             group["initial_lr"] = group["lr"]
 
     def get_lr_multiplier(it):
-        lrm = 1.0 - it / num_steps
+        lrm = max(0.1, 1.0 - it / num_steps)
         return max(0.0, lrm)
 
     print("Starting training...")
 
-    # num of steps to run
-    steps_to_run = 400
+    # num of steps to run (auto-calculated from num_epochs)
+    steps_to_run = num_steps
 
     for step in range(steps_to_run):
         if step % eval_every == 0:
@@ -331,8 +350,10 @@ def main():
         num_updates = 0
         
         for mini_epoch in range(num_mini_epochs):
-            # shuffle indices for this mini-epoch (on CPU)
-            indices = torch.randperm(total_samples)
+            # shuffle indices for this mini-epoch (on CPU) - deterministic seeding
+            shuffle_seed = step * 1000 + mini_epoch
+            generator = torch.Generator().manual_seed(shuffle_seed)
+            indices = torch.randperm(total_samples, generator=generator)
             
             for i in range(0, total_samples, mini_batch_size):
                 # get mini-batch indices
@@ -386,28 +407,15 @@ def main():
         avg_loss = total_loss / num_updates if num_updates > 0 else 0.0
         mean_reward = all_rewards.mean().item()
         
-        # Calculate per-example accuracy 
-        # all_rewards is (examples_per_step * num_samples,) - reshape to (examples_per_step, num_samples)
-        reshaped_rewards = all_rewards.view(examples_per_step, num_samples)
-        
-        any_correct = (reshaped_rewards > 0.5).any(dim=1).float()  # Pass@K style
-        first_correct = (reshaped_rewards[:, 0] > 0.5).float()  # Pass@1 (first sample only)
-        example_accuracy = any_correct.mean().item()  # This is like Pass@K
-        pass1_accuracy = first_correct.mean().item()  # This matches eval better
-        
         # Sync metrics across all ranks
         if ddp:
-            # We want the global average for loss and reward
-            # avg_loss (float), mean_reward (float) -> convert to tensor
-            metrics = torch.tensor([avg_loss, mean_reward, example_accuracy, pass1_accuracy], dtype=torch.float, device=device)
+            metrics = torch.tensor([avg_loss, mean_reward], dtype=torch.float, device=device)
             dist.all_reduce(metrics, op=dist.ReduceOp.AVG)
             avg_loss = metrics[0].item()
             mean_reward = metrics[1].item()
-            example_accuracy = metrics[2].item()
-            pass1_accuracy = metrics[3].item()
         
         if master_process:
-            print(f"Step {step} | Loss: {avg_loss:.4f} | LR: {lrm:.4f} | MeanRwd: {mean_reward:.4f} | Pass@1: {pass1_accuracy:.4f} | Pass@{num_samples}: {example_accuracy:.4f}")
+            print(f"Step {step} | Loss: {avg_loss:.4f} | LR: {lrm:.4f} | MeanRwd: {mean_reward:.4f}")
             
             if use_wandb:
                 wandb.log({
@@ -416,8 +424,6 @@ def main():
                     "lrm": lrm,
                     "num_updates": num_updates,
                     "mean_reward": mean_reward,
-                    "train/pass1_accuracy": pass1_accuracy,
-                    "train/pass_at_k_accuracy": example_accuracy,
                 })
 
         # Save Model
@@ -425,7 +431,7 @@ def main():
             base_dir = get_base_dir()
             depth = model.config.n_layer
             model_tag = f"d{depth}"
-            checkpoint_dir = os.path.join(base_dir, "chatrl_checkpoints", model_tag)
+            checkpoint_dir = os.path.join(base_dir, "chatrl_checkpoints_v4", model_tag)
             model_config_kwargs = model.config.__dict__
             save_checkpoint(
                 checkpoint_dir,
