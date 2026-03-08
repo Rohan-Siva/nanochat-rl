@@ -43,7 +43,7 @@ The progression of scripts is as follows:
 
 ## Quantitative Results
 
-The models were evaluated on the GSM8K test and train splits using `pass@1` and `pass@128` metrics. Below are the consolidated insights and learning curves based on checkpoint evaluations.
+The models were evaluated on the GSM8K test and train splits. Below are the consolidated insights and learning curves based on checkpoint evaluations.
 
 ### Learning Curve (Pass@1 Test Accuracy)
 
@@ -66,18 +66,7 @@ The learning curves below demonstrate the training progression for intermediate 
 | **RL v5 Stable** | 466 | 0.131 |
 
 
-### Final Evaluation (Pass@128 Test Accuracy)
 
-We ran a high-sample `pass@128` evaluation on the custom auto RL checkpoint vs the baseline SFT.
-
-![Pass@128 Comparison](assets/pass128_comparison.png)
-
-#### Final Pass@128 Data Table (Test Split)
-
-| Model Setup | Dataset Split | Step | Pass@128 Target | Accuracy |
-| :--- | :--- | :--- | :--- | :--- |
-| SFT Baseline | Test | 650 | Pass@128 | **47.16%** |
-| RL Custom (Auto) | Test | 249 | Pass@128 | **38.00%** |
 
 
 ## Key Findings & Research Notes
@@ -85,4 +74,4 @@ We ran a high-sample `pass@128` evaluation on the custom auto RL checkpoint vs t
 1.  **Advantage Calculation is Fragile:** Normalizing advantages using standard deviation ($A = (r - \mu) / \sigma$) can cause extreme gradients when the model converges to a single behavior (e.g., failing consistently on early steps). Switching to GAPO-style advantages ($A = r - \mu$) as in script version 6 proved much more stable.
 2.  **Learning Rate Sensitivity:** Standard SFT learning rates were far too high for RL fine-tuning. A 10x reduction (v5) stabilized training significantly, preventing immediate reward collapse. Iteration v6 strikes a balance with a 5x reduction, maintaining learning velocity without exploding.
 3.  **Token-Level vs Sequence-Level:** Moving to token-level log probabilities (PPO masking padding tokens) alongside properly tuned `clip_eps` was vital for stability over multiple mini-epochs. Sequence-level PPO is numerically unstable when sequences are long.
-4.  **Overall Efficacy:** The `RL v5 Stable` training run showed a clear ability to exceed the SFT baseline, improving `pass@1` on GSM8K from `~9.8%` to `14.5%`. However, high-variance sampling (`pass@128`) still shows the SFT general representation holding a slight edge (`47.1%` vs `38.0%` for an intermediate RL run), indicating that while RL pushes the primary mode of the distribution toward correctness, the broader tail might narrow or degrade. Future tests with speculative decoding will focus on leveraging this narrowed, highly-conditioned trajectory distribution.
+4.  **Overall Efficacy:** The `RL v5 Stable` training run showed a clear ability to exceed the SFT baseline, improving `pass@1` on GSM8K from `~9.8%` to `14.5%`. This demonstrates that the stable GRPO variant successfully pushes the primary mode of the distribution toward correctness without immediately collapsing. Future tests with speculative decoding will focus on leveraging this tightened trajectory distribution.

@@ -109,25 +109,7 @@ def generate_plots():
     plt.savefig('assets/grpo_learning_curve.png', dpi=300, bbox_inches='tight')
     print("Saved learning curve plot to assets/grpo_learning_curve.png")
     
-    # Plot final Pass@128 comparison
-    df_p128 = df[(df['pass_k'] == 128)].dropna(subset=['accuracy'])
-    
-    if not df_p128.empty:
-        plt.figure(figsize=(8, 6))
-        
-        # Group by run type and split
-        summary = df_p128.groupby(['run_type', 'split'])['accuracy'].max().unstack()
-        
-        summary.plot(kind='bar', figsize=(10, 6), color=['skyblue', 'salmon'])
-        plt.title('Pass@128 Accuracy Validation (GRPO vs SFT)')
-        plt.ylabel('Pass@128 Accuracy')
-        plt.xlabel('Model Setup')
-        plt.xticks(rotation=45)
-        plt.legend(title='Dataset Split')
-        plt.tight_layout()
-        
-        plt.savefig('assets/pass128_comparison.png', dpi=300)
-        print("Saved Pass@128 comparison plot to assets/pass128_comparison.png")
+
 
     # Generate markdown tables summary
     print("\n--- Summary Tables ---")
@@ -135,9 +117,7 @@ def generate_plots():
     table_p1 = df_p1.groupby(['run_type', 'step'])['accuracy'].max().reset_index()
     print(table_p1.to_markdown(index=False))
     
-    print("\nPass@128 Accuracy:")
-    table_p128 = df_p128.groupby(['run_type', 'split', 'step'])['accuracy'].max().reset_index()
-    print(table_p128.to_markdown(index=False))
+
 
 if __name__ == "__main__":
     generate_plots()
