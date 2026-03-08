@@ -68,10 +68,9 @@ The learning curves below demonstrate the training progression for intermediate 
 
 
 
-
 ## Key Findings & Research Notes
 
 1.  **Advantage Calculation is Fragile:** Normalizing advantages using standard deviation ($A = (r - \mu) / \sigma$) can cause extreme gradients when the model converges to a single behavior (e.g., failing consistently on early steps). Switching to GAPO-style advantages ($A = r - \mu$) as in script version 6 proved much more stable.
 2.  **Learning Rate Sensitivity:** Standard SFT learning rates were far too high for RL fine-tuning. A 10x reduction (v5) stabilized training significantly, preventing immediate reward collapse. Iteration v6 strikes a balance with a 5x reduction, maintaining learning velocity without exploding.
 3.  **Token-Level vs Sequence-Level:** Moving to token-level log probabilities (PPO masking padding tokens) alongside properly tuned `clip_eps` was vital for stability over multiple mini-epochs. Sequence-level PPO is numerically unstable when sequences are long.
-4.  **Overall Efficacy:** The `RL v5 Stable` training run showed a clear ability to exceed the SFT baseline, improving `pass@1` on GSM8K from `~9.8%` to `14.5%`. This demonstrates that the stable GRPO variant successfully pushes the primary mode of the distribution toward correctness without immediately collapsing. Future tests with speculative decoding will focus on leveraging this tightened trajectory distribution.
+4.  **Overall Efficacy:** The `RL v5 Stable` training run showed a clear ability to exceed the SFT baseline, improving `pass@1` on GSM8K from `~9.8%` to `14.5%`. This demonstrates that the stable GRPO variant successfully pushes the primary mode of the distribution toward correctness without immediately collapsing.
