@@ -1,0 +1,46 @@
+{
+    "checkpoint_dir": "/home/jl77863/.cache/nanochat/chatrl_checkpoints_v4/d32",
+    "num_samples": 1000,
+    "pass_at_k": 1,
+    "temperature": 0.6,
+    "results": [
+        {
+            "step": 100,
+            "accuracy": 0.141,
+            "correct": 141,
+            "total": 1000,
+            "pass_at_k": 1
+        },
+        {
+            "step": 200,
+            "accuracy": 0.141,
+            "correct": 141,
+            "total": 1000,
+            "pass_at_k": 1
+        },
+        {
+            "step": 300,
+            "accuracy": 0.162,
+            "correct": 162,
+            "total": 1000,
+            "pass_at_k": 1
+        },
+        {
+            "step": 400,
+            "accuracy": 0.168,
+            "correct": 168,
+            "total": 1000,
+            "pass_at_k": 1
+        },
+        {
+            "step": 466,
+            "accuracy": 0.115,
+            "correct": 115,
+            "total": 1000,
+            "pass_at_k": 1
+        }
+    ],
+    "best_step": 400,
+    "best_accuracy": 0.168,
+    "timestamp": "20260122-024107"
+}

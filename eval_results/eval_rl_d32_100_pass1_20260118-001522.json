@@ -1,0 +1,21 @@
+{
+    "config": {
+        "source": "rl",
+        "tag": "d32",
+        "step": 100,
+        "device": "",
+        "dtype": "bfloat16",
+        "eval": true,
+        "num_samples": 200,
+        "pass_at_k": 1,
+        "batch_size": 16,
+        "temperature": 0.6,
+        "output_dir": "eval_results",
+        "split": "train"
+    },
+    "final_accuracy": 0.145,
+    "total_samples": 200,
+    "correct_samples": 29,
+    "timestamp": "20260118-001522",
+    "dataset": "GSM8K_train"
+}

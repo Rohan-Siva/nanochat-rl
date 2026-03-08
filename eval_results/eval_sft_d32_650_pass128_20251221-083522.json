@@ -1,0 +1,20 @@
+{
+    "config": {
+        "source": "sft",
+        "tag": "d32",
+        "step": 650,
+        "device": "",
+        "dtype": "bfloat16",
+        "eval": true,
+        "num_samples": 1319,
+        "pass_at_k": 128,
+        "batch_size": 16,
+        "temperature": 0.6,
+        "output_dir": "eval_results"
+    },
+    "final_accuracy": 0.4715693707354056,
+    "total_samples": 1319,
+    "correct_samples": 622,
+    "timestamp": "20251221-083522",
+    "dataset": "GSM8K_test"
+}

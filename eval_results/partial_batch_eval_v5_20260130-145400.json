@@ -1,0 +1,17 @@
+{
+    "checkpoint_dir": "/home/jl77863/.cache/nanochat/chatrl_checkpoints_v5/d32",
+    "num_samples": 1000,
+    "pass_at_k": 1,
+    "temperature": 0.6,
+    "partial_results_from_interrupted_run": [
+        {
+            "step": 100,
+            "accuracy": 0.1310,
+            "correct": 131,
+            "total": 1000,
+            "pass_at_k": 1
+        }
+    ],
+    "note": "Step 200 was at ~92% when interrupted. Full eval running in screen session.",
+    "timestamp": "20260130-145400"
+}

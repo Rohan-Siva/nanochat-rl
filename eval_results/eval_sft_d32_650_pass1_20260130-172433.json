@@ -1,0 +1,14 @@
+{
+    "checkpoint_dir": "/home/jl77863/.cache/nanochat/chatsft_checkpoints/d32",
+    "num_samples": 1000,
+    "pass_at_k": 1,
+    "temperature": 0.6,
+    "result": {
+        "step": 650,
+        "accuracy": 0.098,
+        "correct": 98,
+        "total": 1000,
+        "pass_at_k": 1
+    },
+    "timestamp": "20260130-172433"
+}
