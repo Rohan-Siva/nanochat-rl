@@ -1,0 +1,20 @@
+{
+    "config": {
+        "source": "rl",
+        "tag": null,
+        "step": 249,
+        "device": "",
+        "dtype": "bfloat16",
+        "eval": true,
+        "num_samples": 4000,
+        "pass_at_k": 128,
+        "batch_size": 16,
+        "temperature": 0.6,
+        "output_dir": "my_results_train"
+    },
+    "final_accuracy": 0.25675,
+    "total_samples": 4000,
+    "correct_samples": 1027,
+    "timestamp": "20251219-043908",
+    "dataset": "GSM8K_test"
+}
