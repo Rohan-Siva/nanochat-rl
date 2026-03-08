@@ -31,6 +31,7 @@ def get_args():
     parser.add_argument("--batch_size", type=int, default=16, help="Batch size for generation (to avoid OOM)")
     parser.add_argument("--temperature", type=float, default=0.6, help="Sampling temperature")
     parser.add_argument("--output_dir", type=str, default="eval_results", help="Directory to save evaluation results")
+    parser.add_argument("--split", type=str, default="test", choices=["train", "test"], help="Dataset split to evaluate on (train or test)")
     return parser.parse_args()
 
 def main():
@@ -116,9 +117,9 @@ def main():
 
     if args.eval:
         if ddp_rank == 0:
-            print0(f"\nEvaluating on GSM8K (test split) - {args.num_samples} samples (Pass@{args.pass_at_k}) across {ddp_world_size} GPUs")
+            print0(f"\nEvaluating on GSM8K ({args.split} split) - {args.num_samples} samples (Pass@{args.pass_at_k}) across {ddp_world_size} GPUs")
         
-        val_task = GSM8K(subset="main", split="test")
+        val_task = GSM8K(subset="main", split=args.split)
         
         correct_count = 0
         total_count = 0
@@ -194,7 +195,7 @@ def main():
                 "total_samples": global_total,
                 "correct_samples": global_correct,
                 "timestamp": timestamp,
-                "dataset": "GSM8K_test"
+                "dataset": f"GSM8K_{args.split}"
             }
             
             with open(output_path, "w") as f:
