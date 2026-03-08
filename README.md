@@ -1,6 +1,6 @@
-# Trajectory-Conditioned Speculative Decoding & GRPO Testing
+# Nanochat GRPO Testing
 
-This repository contains research and implementations for Trajectory-Conditioned Speculative Decoding, primarily focused on testing and optimizing Group Relative Policy Optimization (GRPO) for a 7B language model on reasoning tasks (GSM8K).
+This repository contains research and implementations primarily focused on testing and optimizing Group Relative Policy Optimization (GRPO) for the nanochat language model on reasoning tasks (GSM8K).
 
 ## Experiment Variations
 
